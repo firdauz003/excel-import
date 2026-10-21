@@ -7,6 +7,7 @@ namespace App;
 
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Reader\IReader;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PDO;
 use RuntimeException;
 
@@ -15,6 +16,7 @@ class ExcelImporter
     private string $filePath;
     private ?array $headers = null;
     private ?array $sampleRows = null;
+    private ?string $selectedSheet = null;
 
     public function __construct(string $filePath)
     {
@@ -25,32 +27,57 @@ class ExcelImporter
     }
 
     /**
-     * Load only the first row as headers + a few sample data rows.
+     * List all worksheet names in the workbook (does not load full data).
+     *
+     * @return string[]
      */
-    public function loadHeadersAndSamples(int $sampleCount = 5): void
+    public function listSheetNames(): array
     {
         $reader = $this->createReader();
-        $reader->setReadDataOnly(true);
-
-        // Read only first N+1 rows for speed
-        $reader->setReadFilter(new class($sampleCount + 1) implements \PhpOffice\PhpSpreadsheet\Reader\IReadFilter {
-            private int $maxRow;
-            public function __construct(int $maxRow) { $this->maxRow = $maxRow; }
-            public function readCell(string $columnAddress, int $row, string $worksheetName = ''): bool
-            {
-                return $row <= $this->maxRow;
-            }
-        });
-
-        $spreadsheet = $reader->load($this->filePath);
-        $sheet = $spreadsheet->getActiveSheet();
-        $rows = $sheet->toArray(null, true, true, false);
-
-        if (empty($rows)) {
-            throw new RuntimeException('Excel file is empty.');
+        if (method_exists($reader, 'listWorksheetNames')) {
+            /** @var string[] $names */
+            $names = $reader->listWorksheetNames($this->filePath);
+            return array_values($names);
         }
 
-        // Normalize headers
+        // Fallback: load workbook metadata
+        $reader->setReadDataOnly(true);
+        $spreadsheet = $reader->load($this->filePath);
+        $names = $spreadsheet->getSheetNames();
+        $spreadsheet->disconnectWorksheets();
+        unset($spreadsheet);
+
+        return array_values($names);
+    }
+
+    /**
+     * Load headers + sample rows from a specific sheet.
+     *
+     * @param string|null $sheetName  null = active/first sheet
+     * @param bool $calculateFormulas Resolve formulas (including cross-sheet refs)
+     */
+    public function loadHeadersAndSamples(
+        ?string $sheetName = null,
+        int $sampleCount = 5,
+        bool $calculateFormulas = true
+    ): void {
+        $this->selectedSheet = $sheetName;
+
+        // For formula calculation we need the full workbook loaded (other sheets available).
+        $reader = $this->createReader();
+        $reader->setReadDataOnly(!$calculateFormulas);
+
+        $spreadsheet = $reader->load($this->filePath);
+        $sheet = $this->resolveSheet($spreadsheet, $sheetName);
+
+        // toArray: nullValue, calculateFormulas, formatData, returnCellRef
+        $rows = $sheet->toArray(null, $calculateFormulas, true, false);
+
+        if (empty($rows)) {
+            $spreadsheet->disconnectWorksheets();
+            throw new RuntimeException('Selected sheet is empty.');
+        }
+
         $rawHeaders = $rows[0] ?? [];
         $this->headers = [];
         foreach ($rawHeaders as $idx => $header) {
@@ -58,7 +85,6 @@ class ExcelImporter
             $this->headers[$idx] = $clean !== '' ? $clean : 'Column_' . ($idx + 1);
         }
 
-        // Sample data rows
         $this->sampleRows = array_slice($rows, 1, $sampleCount);
 
         $spreadsheet->disconnectWorksheets();
@@ -68,7 +94,7 @@ class ExcelImporter
     public function getHeaders(): array
     {
         if ($this->headers === null) {
-            $this->loadHeadersAndSamples();
+            $this->loadHeadersAndSamples($this->selectedSheet);
         }
         return $this->headers;
     }
@@ -76,34 +102,37 @@ class ExcelImporter
     public function getSampleRows(): array
     {
         if ($this->sampleRows === null) {
-            $this->loadHeadersAndSamples();
+            $this->loadHeadersAndSamples($this->selectedSheet);
         }
         return $this->sampleRows;
     }
 
     /**
-     * Process the whole file using a mapping.
+     * Import using column mapping.
      *
-     * $mapping example:
-     * [
-     *   0 => 'name',      // Excel column index 0 → DB column "name"
-     *   2 => 'email',
-     *   1 => null,        // ignore
-     * ]
+     * $options:
+     *   - skip_header (bool)
+     *   - batch_size (int)
+     *   - unique_key (string|null)
+     *   - sheet_name (string|null)
+     *   - calculate_formulas (bool) — resolve formulas / cross-sheet references
      *
-     * Returns ['success' => int, 'errors' => array, 'skipped' => int]
+     * @return array{success:int, skipped:int, errors:array}
      */
     public function importWithMapping(PDO $pdo, string $table, array $mapping, array $options = []): array
     {
-        $skipHeader   = $options['skip_header'] ?? true;
-        $batchSize    = $options['batch_size'] ?? 100;
-        $uniqueKey    = $options['unique_key'] ?? null; // e.g. 'email' for simple upsert
+        $skipHeader         = $options['skip_header'] ?? true;
+        $batchSize          = $options['batch_size'] ?? 100;
+        $uniqueKey          = $options['unique_key'] ?? null;
+        $sheetName          = $options['sheet_name'] ?? $this->selectedSheet;
+        $calculateFormulas  = $options['calculate_formulas'] ?? true;
 
         $reader = $this->createReader();
-        $reader->setReadDataOnly(true);
+        $reader->setReadDataOnly(!$calculateFormulas);
         $spreadsheet = $reader->load($this->filePath);
-        $sheet = $spreadsheet->getActiveSheet();
-        $allRows = $sheet->toArray(null, true, true, false);
+        $sheet = $this->resolveSheet($spreadsheet, $sheetName);
+
+        $allRows = $sheet->toArray(null, $calculateFormulas, true, false);
 
         $spreadsheet->disconnectWorksheets();
         unset($spreadsheet);
@@ -112,7 +141,6 @@ class ExcelImporter
             array_shift($allRows);
         }
 
-        // Build the list of DB columns we will insert
         $dbColumns = array_values(array_filter($mapping, fn($col) => $col !== null && $col !== ''));
         if (empty($dbColumns)) {
             throw new RuntimeException('No columns mapped.');
@@ -121,7 +149,6 @@ class ExcelImporter
         $placeholders = implode(', ', array_fill(0, count($dbColumns), '?'));
         $columnList   = '`' . implode('`, `', $dbColumns) . '`';
 
-        // Simple INSERT (or REPLACE / ON DUPLICATE if uniqueKey given)
         if ($uniqueKey && in_array($uniqueKey, $dbColumns, true)) {
             $updates = [];
             foreach ($dbColumns as $col) {
@@ -154,9 +181,17 @@ class ExcelImporter
                 if ($value !== null && $value !== '') {
                     $hasData = true;
                 }
-                // Basic cleanup
                 if (is_string($value)) {
                     $value = trim($value);
+                }
+                // Excel date serial → Y-m-d when column looks like a date field
+                if (is_numeric($value) && $dbCol === 'joined_at') {
+                    try {
+                        $value = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToDateTimeObject((float)$value)
+                            ->format('Y-m-d');
+                    } catch (\Throwable $e) {
+                        // keep original
+                    }
                 }
                 $data[] = $value === '' ? null : $value;
             }
@@ -174,7 +209,6 @@ class ExcelImporter
             }
         }
 
-        // remaining
         if (!empty($batch)) {
             $this->flushBatch($stmt, $batch, $success, $errors, count($allRows));
         }
@@ -186,24 +220,34 @@ class ExcelImporter
         ];
     }
 
+    private function resolveSheet(Spreadsheet $spreadsheet, ?string $sheetName)
+    {
+        if ($sheetName === null || $sheetName === '') {
+            return $spreadsheet->getActiveSheet();
+        }
+
+        $sheet = $spreadsheet->getSheetByName($sheetName);
+        if ($sheet === null) {
+            throw new RuntimeException('Sheet not found: ' . $sheetName);
+        }
+        return $sheet;
+    }
+
     private function flushBatch(\PDOStatement $stmt, array $batch, int &$success, array &$errors, int $approxRow): void
     {
-        // Try the whole batch first; on any failure fall back to row-by-row
-        // so we can report which rows failed.
         try {
             foreach ($batch as $data) {
                 $stmt->execute($data);
                 $success++;
             }
         } catch (\PDOException $e) {
-            // Isolate bad rows
             foreach ($batch as $i => $data) {
                 try {
                     $stmt->execute($data);
                     $success++;
                 } catch (\PDOException $ex) {
                     $errors[] = [
-                        'row'   => $approxRow - count($batch) + $i + 2, // approximate Excel row
+                        'row'   => $approxRow - count($batch) + $i + 2,
                         'error' => $ex->getMessage(),
                         'data'  => $data,
                     ];

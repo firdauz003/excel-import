@@ -11,11 +11,17 @@ if (empty($_SESSION['import']['file_path']) || !is_file($_SESSION['import']['fil
     exit;
 }
 
-$import  = $_SESSION['import'];
-$headers = $import['headers'];
-$samples = $import['samples'];
+if (empty($_SESSION['import']['headers'])) {
+    // Sheet not chosen yet
+    header('Location: select_sheet.php');
+    exit;
+}
 
-// Target DB columns (hard-coded for prototype – later fetch from information_schema)
+$import    = $_SESSION['import'];
+$headers   = $import['headers'];
+$samples   = $import['samples'];
+$sheetName = $import['sheet_name'] ?? '(default)';
+
 $dbColumns = [
     'name'       => 'Name (required)',
     'email'      => 'Email (required, unique)',
@@ -23,7 +29,6 @@ $dbColumns = [
     'department' => 'Department',
     'joined_at'  => 'Joined Date',
 ];
-
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -41,16 +46,24 @@ $dbColumns = [
         .sample { color: #64748b; font-size: 0.85rem; margin-top: 4px; }
         button { background: #2563eb; color: #fff; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 1rem; }
         button:hover { background: #1d4ed8; }
-        .actions { margin-top: 24px; display: flex; gap: 12px; }
+        .actions { margin-top: 24px; display: flex; gap: 12px; flex-wrap: wrap; }
         .secondary { background: #64748b; }
         .info { background: #e0f2fe; color: #075985; padding: 12px; border-radius: 6px; margin-bottom: 16px; }
+        .msg { padding: 12px; border-radius: 6px; margin-bottom: 16px; }
+        .error { background: #fee2e2; color: #991b1b; }
     </style>
 </head>
 <body>
     <h1>Map Excel Columns → Database</h1>
 
+    <?php if (!empty($_SESSION['flash_error'])): ?>
+        <div class="msg error"><?= htmlspecialchars($_SESSION['flash_error']) ?></div>
+        <?php unset($_SESSION['flash_error']); ?>
+    <?php endif; ?>
+
     <div class="info">
         File: <strong><?= htmlspecialchars($import['original_name']) ?></strong><br>
+        Sheet: <strong><?= htmlspecialchars((string)$sheetName) ?></strong><br>
         Detected <?= count($headers) ?> columns. Map each Excel column to a database field (or leave as “Ignore”).
     </div>
 
@@ -100,6 +113,9 @@ $dbColumns = [
 
         <div class="actions">
             <button type="submit">Import Data</button>
+            <?php if (count($import['sheet_names'] ?? []) > 1): ?>
+                <a href="select_sheet.php"><button type="button" class="secondary">Change sheet</button></a>
+            <?php endif; ?>
             <a href="upload.php"><button type="button" class="secondary">Cancel / Upload another</button></a>
         </div>
     </form>

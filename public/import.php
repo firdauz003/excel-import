@@ -9,7 +9,6 @@ require dirname(__DIR__) . '/vendor/autoload.php';
 
 use App\ExcelImporter;
 
-// --- Security / validation ---
 if ($_SERVER['REQUEST_METHOD'] !== 'POST' || empty($_SESSION['import']['file_path'])) {
     $_SESSION['flash_error'] = 'Invalid request or session expired.';
     header('Location: upload.php');
@@ -24,7 +23,8 @@ if (!is_file($filePath)) {
     exit;
 }
 
-// Mapping from form: [excel_index => db_column|""]
+$sheetName = $_SESSION['import']['sheet_name'] ?? null;
+
 $rawMapping = $_POST['mapping'] ?? [];
 $mapping = [];
 foreach ($rawMapping as $idx => $dbCol) {
@@ -33,14 +33,12 @@ foreach ($rawMapping as $idx => $dbCol) {
     $mapping[$idx] = $dbCol !== '' ? $dbCol : null;
 }
 
-// At least one column must be mapped
 if (!array_filter($mapping)) {
     $_SESSION['flash_error'] = 'Please map at least one column.';
     header('Location: map.php');
     exit;
 }
 
-// --- DB connection ---
 $dbConfig = require dirname(__DIR__) . '/config/database.php';
 
 try {
@@ -61,13 +59,14 @@ try {
     exit;
 }
 
-// --- Run import ---
 try {
     $importer = new ExcelImporter($filePath);
     $result = $importer->importWithMapping($pdo, 'employees', $mapping, [
-        'skip_header' => true,
-        'batch_size'  => 50,
-        'unique_key'  => 'email',   // enables ON DUPLICATE KEY UPDATE
+        'skip_header'        => true,
+        'batch_size'         => 50,
+        'unique_key'         => 'email',
+        'sheet_name'         => $sheetName,
+        'calculate_formulas' => true, // resolve cross-sheet formula references
     ]);
 } catch (Throwable $e) {
     $_SESSION['flash_error'] = 'Import failed: ' . $e->getMessage();
@@ -75,11 +74,9 @@ try {
     exit;
 }
 
-// Clean up staged file
 @unlink($filePath);
 unset($_SESSION['import']);
 
-// Store result for display
 $_SESSION['import_result'] = $result;
 
 header('Location: result.php');

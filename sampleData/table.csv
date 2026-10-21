@@ -1,0 +1,11 @@
+Name,Email,Phone,Department,Joined Date
+Alice Tan,alice.tan@example.com,012-3456789,IT,2024-03-15
+Bob Lee,bob.lee@example.com,013-9876543,HR,2023-11-01
+Carol Wong,carol.wong@example.com,014-5551234,Finance,2025-01-20
+David Chong,david.chong@example.com,016-2223344,Marketing,2022-07-08
+Emily Ng,emily.ng@example.com,(empty),IT,2024-09-12
+Frank Lim,frank.lim@example.com,017-8889990,Operations,2021-05-30
+Grace Teo,grace.teo@example.com,018-1112233,HR,2023-02-14
+Henry Yap,henry.yap@example.com,019-4445566,Finance,2024-11-03
+Ivy Koh,ivy.koh@example.com,011-7778899,Marketing,2020-12-25
+Jason Ong,jason.ong@example.com,012-3334455,IT,2025-06-18
